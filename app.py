@@ -26,12 +26,32 @@ _cert_thumbprint = os.getenv("MicrosoftCertThumbprint", "")
 _cert_key_file = os.getenv("MicrosoftCertKeyFile", "")
 _cert_key_inline = os.getenv("MicrosoftCertPrivateKey", "")  # Azure: paste PEM here
 
+def _normalize_pem(raw: str) -> str:
+    """Normalize PEM key regardless of how env var storage mangled the newlines."""
+    # Literal backslash-n sequences (some env systems JSON-encode newlines)
+    if "\\n" in raw and "\n" not in raw:
+        raw = raw.replace("\\n", "\n")
+    # Windows-style line endings
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
+    # Completely flattened — no newlines at all; reconstruct 64-char lines
+    if "\n" not in raw:
+        for begin_tag in ("-----BEGIN PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----"):
+            end_tag = begin_tag.replace("BEGIN", "END")
+            if begin_tag in raw:
+                body = raw.replace(begin_tag, "").replace(end_tag, "").strip()
+                lines = [body[i : i + 64] for i in range(0, len(body), 64)]
+                raw = begin_tag + "\n" + "\n".join(lines) + "\n" + end_tag
+                break
+    return raw if raw.endswith("\n") else raw + "\n"
+
+
 if _cert_thumbprint and (_cert_key_file or _cert_key_inline):
-    _private_key = (
-        _cert_key_inline.replace("\\n", "\n")
-        if _cert_key_inline
-        else open(_cert_key_file).read()
-    )
+    if _cert_key_inline:
+        _private_key = _normalize_pem(_cert_key_inline)
+    else:
+        _private_key = open(_cert_key_file).read()
+    first_line = _private_key.split("\n")[0]
+    print(f"[CERT] key loaded — first line: {repr(first_line)}, length: {len(_private_key)}, newlines: {_private_key.count(chr(10))}", file=sys.stderr)
     _app_credential = CertificateAppCredentials(
         app_id=_app_id,
         certificate_thumbprint=_cert_thumbprint,
