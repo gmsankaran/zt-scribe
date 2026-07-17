@@ -1,0 +1,15 @@
+# Secrets — never commit these
+.env
+bot.key
+*.pem
+local.settings.json
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Generated packages — rebuild locally
+*.zip
