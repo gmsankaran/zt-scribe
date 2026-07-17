@@ -70,8 +70,13 @@ async def messages(req: Request) -> Response:
     return Response(status=201)
 
 
+async def health(req: Request) -> Response:
+    return Response(status=200, text="ok")
+
+
 app = web.Application()
 app.router.add_post("/api/messages", messages)
+app.router.add_get("/health", health)
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 3978))
