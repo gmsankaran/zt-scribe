@@ -48,6 +48,10 @@ def _mime_type(attachment) -> str:
 class ScribeBot(ActivityHandler):
     async def on_message_activity(self, turn_context: TurnContext):
         attachments = turn_context.activity.attachments or []
+        print(f"[MSG] text={turn_context.activity.text!r:.80} attachments={len(attachments)}", file=sys.stderr)
+        for i, a in enumerate(attachments):
+            print(f"[ATT {i}] type={a.content_type!r} name={a.name!r} url={str(a.content_url or '')[:60]!r}", file=sys.stderr)
+
         image_att = next((_a for _a in attachments if _is_image_attachment(_a)), None)
 
         if not image_att:
