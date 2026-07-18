@@ -87,6 +87,8 @@ async def messages(req: Request) -> Response:
     if req.content_type != "application/json":
         return Response(status=415)
     body = await req.json()
+    import json as _json
+    print(f"[RAW] {_json.dumps(body)[:4000]}", file=sys.stderr)
     activity = Activity().deserialize(body)
     auth_header = req.headers.get("Authorization", "")
     invoke_response = await ADAPTER.process_activity(activity, auth_header, BOT.on_turn)
