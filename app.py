@@ -42,6 +42,11 @@ def _normalize_pem(raw: str) -> str:
                 lines = [body[i : i + 64] for i in range(0, len(body), 64)]
                 raw = begin_tag + "\n" + "\n".join(lines) + "\n" + end_tag
                 break
+    # Missing header/footer (pasted without the -----BEGIN/END----- lines)
+    if "-----BEGIN" not in raw:
+        raw = "-----BEGIN PRIVATE KEY-----\n" + raw
+    if "-----END" not in raw:
+        raw = raw.rstrip("\n") + "\n-----END PRIVATE KEY-----"
     return raw if raw.endswith("\n") else raw + "\n"
 
 
