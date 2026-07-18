@@ -8,6 +8,7 @@ and posts the minutes back to the conversation.
 import base64
 import json
 import os
+import re
 import sys
 import aiohttp
 from botbuilder.core import ActivityHandler, TurnContext
@@ -32,15 +33,27 @@ _EXT_TO_MIME = {
 def _is_image_attachment(a) -> bool:
     if a.content_type and a.content_type.startswith("image/"):
         return True
-    # Teams file uploads arrive as this type; check extension
     if a.content_type == "application/vnd.microsoft.teams.file.download.info":
         return any((a.name or "").lower().endswith(ext) for ext in _IMAGE_EXTS)
+    if a.content_type == "text/html":
+        # Image embedded in message body — check the HTML has an <img> tag
+        html = a.content if isinstance(a.content, str) else ""
+        return bool(re.search(r"<img\b", html, re.IGNORECASE))
     return False
 
 
 def _mime_type(attachment) -> str:
     if attachment.content_type and attachment.content_type.startswith("image/"):
         return attachment.content_type
+    if attachment.content_type == "text/html":
+        html = attachment.content if isinstance(attachment.content, str) else ""
+        m = re.search(r'<img\b[^>]+\bsrc=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if m:
+            src = m.group(1)
+            if src.startswith("data:image/"):
+                return src.split(";")[0][5:]  # "data:image/jpeg;..." → "image/jpeg"
+            ext = os.path.splitext(src.split("?")[0].lower())[1]
+            return _EXT_TO_MIME.get(ext, "image/jpeg")
     ext = os.path.splitext((attachment.name or "").lower())[1]
     return _EXT_TO_MIME.get(ext, "image/jpeg")
 
@@ -50,7 +63,8 @@ class ScribeBot(ActivityHandler):
         attachments = turn_context.activity.attachments or []
         print(f"[MSG] text={turn_context.activity.text!r:.80} attachments={len(attachments)}", file=sys.stderr)
         for i, a in enumerate(attachments):
-            print(f"[ATT {i}] type={a.content_type!r} name={a.name!r} url={str(a.content_url or '')[:60]!r}", file=sys.stderr)
+            content_preview = str(a.content or "")[:150] if a.content_type == "text/html" else ""
+        print(f"[ATT {i}] type={a.content_type!r} name={a.name!r} url={str(a.content_url or '')[:60]!r} html={content_preview!r}", file=sys.stderr)
 
         image_att = next((_a for _a in attachments if _is_image_attachment(_a)), None)
 
@@ -73,7 +87,7 @@ class ScribeBot(ActivityHandler):
 
 
 async def _download_image(attachment) -> bytes:
-    # Teams file upload — content is a dict with a pre-signed downloadUrl (no auth needed)
+    # Teams file upload — pre-signed downloadUrl, no auth needed
     if attachment.content_type == "application/vnd.microsoft.teams.file.download.info":
         content = attachment.content
         if isinstance(content, str):
@@ -81,6 +95,23 @@ async def _download_image(attachment) -> bytes:
         url = (content or {}).get("downloadUrl") or attachment.content_url
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
+                resp.raise_for_status()
+                return await resp.read()
+
+    # Image embedded in Teams message HTML body
+    if attachment.content_type == "text/html":
+        html = attachment.content if isinstance(attachment.content, str) else ""
+        match = re.search(r'<img\b[^>]+\bsrc=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if not match:
+            raise ValueError("text/html attachment has no <img src>")
+        url = match.group(1)
+        print(f"[HTML-IMG] src={url[:80]!r}", file=sys.stderr)
+        if url.startswith("data:"):
+            _, encoded = url.split(",", 1)
+            return base64.b64decode(encoded)
+        headers = await _bot_service_headers()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
                 resp.raise_for_status()
                 return await resp.read()
 
