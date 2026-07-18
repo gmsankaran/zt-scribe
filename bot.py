@@ -60,17 +60,19 @@ def _mime_type(attachment) -> str:
 
 class ScribeBot(ActivityHandler):
     async def on_message_activity(self, turn_context: TurnContext):
-        attachments = turn_context.activity.attachments or []
-        print(f"[MSG] text={turn_context.activity.text!r:.80} attachments={len(attachments)}", file=sys.stderr)
-        for i, a in enumerate(attachments):
-            content_preview = str(a.content or "")[:150] if a.content_type == "text/html" else ""
-        print(f"[ATT {i}] type={a.content_type!r} name={a.name!r} url={str(a.content_url or '')[:60]!r} html={content_preview!r}", file=sys.stderr)
+        try:
+            raw = json.dumps(turn_context.activity.serialize(), default=str)
+            print(f"[ACTIVITY] {raw[:3000]}", file=sys.stderr)
+        except Exception as _e:
+            print(f"[ACTIVITY-ERR] {_e}", file=sys.stderr)
 
+        attachments = turn_context.activity.attachments or []
         image_att = next((_a for _a in attachments if _is_image_attachment(_a)), None)
 
         if not image_att:
             await turn_context.send_activity(
-                "Attach a whiteboard photo and I'll turn it into meeting minutes."
+                "Please include the whiteboard photo **in the same message** as your request — "
+                "attach it with the 📎 button (or paste it), then @mention me and send."
             )
             return
 
