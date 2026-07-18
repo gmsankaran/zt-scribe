@@ -120,32 +120,46 @@ async def _image_from_graph(activity) -> tuple[bytes | None, str]:
         print(f"[Graph] missing IDs team={team_id} channel={channel_id} msg={message_id}", file=sys.stderr)
         return None, "image/jpeg"
 
-    # Channel ID contains @ which must be URL-encoded in the path
     channel_id_enc = quote(channel_id, safe="")
-    url = (f"https://graph.microsoft.com/v1.0"
-           f"/teams/{team_id}/channels/{channel_id_enc}/messages/{message_id}"
-           f"?$expand=hostedContents")
+    base = (f"https://graph.microsoft.com/v1.0"
+            f"/teams/{team_id}/channels/{channel_id_enc}/messages/{message_id}")
 
+    # Fetch the message (no $expand — not supported for channel messages)
     try:
-        msg_bytes = await _get(url, headers)
-        msg = json.loads(msg_bytes)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(base, headers=headers) as resp:
+                body = await resp.text()
+                if resp.status != 200:
+                    print(f"[Graph] GET message → {resp.status}: {body[:400]}", file=sys.stderr)
+                    return None, "image/jpeg"
+                msg = json.loads(body)
     except Exception as exc:
-        print(f"[Graph] GET message failed: {exc}", file=sys.stderr)
+        print(f"[Graph] GET message exception: {exc}", file=sys.stderr)
         return None, "image/jpeg"
 
-    print(f"[Graph] attachments={len(msg.get('attachments') or [])} "
-          f"hostedContents={len(msg.get('hostedContents') or [])}", file=sys.stderr)
+    atts = msg.get("attachments") or []
+    print(f"[Graph] message OK, attachments={len(atts)}", file=sys.stderr)
+    for a in atts:
+        print(f"[Graph]   att: contentType={a.get('contentType')!r} name={a.get('name')!r} "
+              f"contentUrl={str(a.get('contentUrl') or '')[:80]!r}", file=sys.stderr)
 
-    # Inline / pasted images
-    for hc in (msg.get("hostedContents") or []):
-        ct = hc.get("contentType", "")
-        if ct.startswith("image/"):
-            raw = hc.get("contentBytes", "")
-            if raw:
-                return base64.b64decode(raw), ct
+    # Fetch hostedContents separately (inline/pasted images)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base}/hostedContents", headers=headers) as resp:
+                if resp.status == 200:
+                    hc_data = await resp.json()
+                    for hc in (hc_data.get("value") or []):
+                        ct = hc.get("contentType", "")
+                        if ct.startswith("image/"):
+                            raw = hc.get("contentBytes", "")
+                            if raw:
+                                return base64.b64decode(raw), ct
+    except Exception as exc:
+        print(f"[Graph] hostedContents fetch: {exc}", file=sys.stderr)
 
-    # File attachments (SharePoint)
-    for att in (msg.get("attachments") or []):
+    # File attachments (SharePoint reference)
+    for att in atts:
         name = (att.get("name") or "").lower()
         content_url = att.get("contentUrl") or ""
         if content_url and any(name.endswith(ext) for ext in _IMAGE_EXTS):
