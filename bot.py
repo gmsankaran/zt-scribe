@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+from urllib.parse import quote
 import aiohttp
 import msal
 from botbuilder.core import ActivityHandler, TurnContext
@@ -110,7 +111,8 @@ async def _image_from_graph(activity) -> tuple[bytes | None, str]:
 
     headers = {"Authorization": f"Bearer {token}"}
     cd = activity.channel_data or {}
-    team_id    = cd.get("teamsTeamId") or (cd.get("team") or {}).get("id")
+    # Graph API needs the AAD group ID for the team, not the Teams thread ID
+    team_id    = (cd.get("team") or {}).get("aadGroupId")
     channel_id = cd.get("teamsChannelId") or (cd.get("channel") or {}).get("id")
     message_id = activity.id
 
@@ -118,8 +120,10 @@ async def _image_from_graph(activity) -> tuple[bytes | None, str]:
         print(f"[Graph] missing IDs team={team_id} channel={channel_id} msg={message_id}", file=sys.stderr)
         return None, "image/jpeg"
 
+    # Channel ID contains @ which must be URL-encoded in the path
+    channel_id_enc = quote(channel_id, safe="")
     url = (f"https://graph.microsoft.com/v1.0"
-           f"/teams/{team_id}/channels/{channel_id}/messages/{message_id}"
+           f"/teams/{team_id}/channels/{channel_id_enc}/messages/{message_id}"
            f"?$expand=hostedContents")
 
     try:
