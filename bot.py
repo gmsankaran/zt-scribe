@@ -170,6 +170,11 @@ async def _image_from_activity(activity) -> tuple[bytes | None, str]:
             if url.startswith("data:"):
                 _, enc = url.split(",", 1)
                 return base64.b64decode(enc), ct
+            # smba.trafficmanager.net URLs require a bot-service connector token
+            # that isn't available here; skip them and let Graph handle it instead.
+            if "smba.trafficmanager.net" in url or "botframework.com" in url:
+                print(f"[att] skipping bot-service URL (needs connector token) — Graph will handle", file=sys.stderr)
+                continue
             try:
                 return await _get(url, {}), ct
             except Exception as exc:

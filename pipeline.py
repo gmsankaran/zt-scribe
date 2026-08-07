@@ -135,7 +135,12 @@ def extract(image_bytes: bytes, media_type: str = "image/jpeg", ctx: dict | None
         ],
     )
 
-    raw = response.content[0].text.strip()
+    # Sonnet 5 may prepend a ThinkingBlock before the text block — find the first TextBlock.
+    text_block = next((b for b in response.content if b.type == "text"), None)
+    if text_block is None:
+        types = [b.type for b in response.content]
+        raise ValueError(f"Model returned no text block (got: {types})")
+    raw = text_block.text.strip()
     # Strip accidental markdown fences
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
