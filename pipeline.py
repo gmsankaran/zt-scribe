@@ -145,11 +145,14 @@ def extract(image_bytes: bytes, media_type: str = "image/jpeg", ctx: dict | None
         ],
     )
 
-    # Only pass thinking parameter for models that support it (Sonnet 5 / Opus 5).
-    # Non-thinking models (Haiku) ignore or reject the parameter.
+    # Sonnet 5 / Opus 5 use the new adaptive-thinking API.
+    # "effort" controls how much the model thinks; "low" is right for an
+    # OCR/extraction task — perception, not deep reasoning.
     _THINKING_MODELS = {"claude-sonnet-5", "claude-opus-5", "claude-fable-5"}
     if model in _THINKING_MODELS:
-        create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+        effort = ctx.get("thinking_effort", "low")
+        create_kwargs["thinking"]      = {"type": "adaptive"}
+        create_kwargs["output_config"] = {"effort": effort}
 
     response = client.messages.create(**create_kwargs)
 
