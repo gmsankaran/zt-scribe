@@ -121,9 +121,19 @@ def extract(image_bytes: bytes, media_type: str = "image/jpeg", ctx: dict | None
     b64_data = base64.standard_b64encode(image_bytes).decode("utf-8")
     prompt   = _build_prompt(ctx)
 
-    response = client.messages.create(
-        model="claude-sonnet-5",
-        max_tokens=4096,
+    # Model is configurable in team_context.json ("model" key).
+    # Default to Sonnet 5. Sonnet 5 thinks by default; max_tokens must cover
+    # the thinking trace (~8k) plus the JSON output (~4k), so 16k minimum.
+    model      = ctx.get("model", "claude-sonnet-5")
+    max_tokens = ctx.get("max_tokens", 16000)
+
+    # For models that support extended thinking, reserve a fixed budget so
+    # the remaining tokens are always available for JSON output.
+    thinking_budget = ctx.get("thinking_budget_tokens", 10000)
+
+    create_kwargs: dict = dict(
+        model=model,
+        max_tokens=max_tokens,
         messages=[
             {
                 "role": "user",
@@ -134,6 +144,14 @@ def extract(image_bytes: bytes, media_type: str = "image/jpeg", ctx: dict | None
             }
         ],
     )
+
+    # Only pass thinking parameter for models that support it (Sonnet 5 / Opus 5).
+    # Non-thinking models (Haiku) ignore or reject the parameter.
+    _THINKING_MODELS = {"claude-sonnet-5", "claude-opus-5", "claude-fable-5"}
+    if model in _THINKING_MODELS:
+        create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+
+    response = client.messages.create(**create_kwargs)
 
     # Sonnet 5 may prepend a ThinkingBlock before the text block — find the first TextBlock.
     text_block = next((b for b in response.content if b.type == "text"), None)
