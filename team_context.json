@@ -1,0 +1,57 @@
+{
+  "_note": "Team knowledge file. Update and commit to git after each session to improve Scribe. Nothing in here is code — edit freely.",
+
+  "format": "friday_fifty",
+
+  "members": ["DS", "SG", "KS", "MA", "GS", "SS"],
+
+  "column_order": ["progress", "plans", "pitfalls"],
+  "column_labels": {
+    "progress": "Progress",
+    "plans": "Plans",
+    "pitfalls": "Pitfalls"
+  },
+
+  "_glossary_note": "Glossary is for Scribe's OCR disambiguation only. Terms are written as-is in the output — do not expand them.",
+  "glossary": {
+    "TA":    "Trace Analyzer",
+    "DCM":   "Driver Communication Module",
+    "CoMa":  "Connection Manager",
+    "ASPICE":"Automotive SPICE",
+    "KT":    "Knowledge Transfer",
+    "CL8MIN":"CL8 platform",
+    "CL56":  "CL56 platform",
+    "ePN":   "Ethernet Private Network",
+    "PBAP":  "Phone Book Access Profile",
+    "HFP":   "Hands-Free Profile",
+    "A2DP":  "Advanced Audio Distribution Profile",
+    "AVRCP": "Audio/Video Remote Control Profile",
+    "MIB4":  "Media Interface Board 4",
+    "PoC":   "Proof of Concept",
+    "SW":    "Software",
+    "TC":    "Test Case",
+    "DE":    "Domain Expert",
+    "NAD":   "Network Access Device",
+    "P4V":   "Perforce Visual Client",
+    "BT":    "Bluetooth",
+    "eCall": "Emergency Call",
+    "MIB":   "Media Interface Board",
+    "BTC":   "Bluetooth Controller",
+    "P4":    "Perforce",
+    "CI":    "Continuous Integration"
+  },
+
+  "people": {
+    "PR":          "Projjol",
+    "Tracy":       "Tracy",
+    "Olena":       "Olena",
+    "Timo":        "Timo",
+    "Deepika":     "Deepika",
+    "Seetharaman": "Seetharaman",
+    "Ankita":      "Ankita",
+    "Karthik":     "Karthik",
+    "Vandhana":    "Vandhana"
+  },
+
+  "confirmed_expansions": {}
+}

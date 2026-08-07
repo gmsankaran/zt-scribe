@@ -4,6 +4,20 @@ ZT Scribe Teams bot.
 In Teams channels file attachments never arrive in the bot activity.
 The bot fetches the image from the message via Microsoft Graph API.
 Requires ChannelMessage.Read.All application permission + admin consent.
+
+Card flow
+---------
+1. User @mentions bot with a whiteboard photo.
+2. Bot calls Claude → board dict → render() → sends draft minutes.
+3. If there are unattributed or low-confidence items, bot also sends a
+   clarification Adaptive Card.
+4. User fills in corrections and clicks "Submit corrections".
+   Teams sends a messageBack activity with activity.value containing:
+     zt_action  : "finalize_minutes"
+     board_b64  : base64-encoded JSON of the original board
+     owner_<N>  : owner assignment for item N (if set)
+     text_<N>   : corrected text for item N (if set)
+5. Bot applies corrections, re-renders, and sends the final minutes.
 """
 
 import base64
@@ -15,9 +29,10 @@ from urllib.parse import quote
 import aiohttp
 import msal
 from botbuilder.core import ActivityHandler, TurnContext
+from botbuilder.schema import Activity, Attachment
 from dotenv import load_dotenv
 
-from pipeline import extract, render
+from pipeline import build_clarification_card, extract, load_context, render
 
 load_dotenv()
 
@@ -29,15 +44,27 @@ _EXT_TO_MIME = {
 
 
 class ScribeBot(ActivityHandler):
+
+    # ------------------------------------------------------------------
+    # Main turn handler
+    # ------------------------------------------------------------------
+
     async def on_message_activity(self, turn_context: TurnContext):
         activity = turn_context.activity
 
-        # Try attachments in the activity first
+        # ---- Adaptive Card submission ----------------------------------------
+        value = getattr(activity, "value", None)
+        if isinstance(value, dict) and "zt_action" in value:
+            await self._handle_card_action(turn_context, value)
+            return
+
+        # ---- Normal image-processing message --------------------------------
         image_bytes, mime = await _image_from_activity(activity)
 
-        # Channel messages never include file data — fetch via Graph API
         if image_bytes is None and _is_channel(activity):
-            await turn_context.send_activity("One moment — fetching the image from the channel...")
+            await turn_context.send_activity(
+                "One moment — fetching the image from the channel…"
+            )
             image_bytes, mime = await _image_from_graph(activity)
 
         if image_bytes is None:
@@ -46,15 +73,87 @@ class ScribeBot(ActivityHandler):
             )
             return
 
-        await turn_context.send_activity("Reading the board, give me a moment...")
+        await turn_context.send_activity("Reading the board, give me a moment…")
         try:
-            board = extract(image_bytes, mime)
-            minutes = render(board)
-            await turn_context.send_activity(minutes)
+            ctx   = load_context()
+            board = extract(image_bytes, mime, ctx)
+            draft = render(board, ctx)
+            await turn_context.send_activity(draft)
+
+            card = build_clarification_card(board, ctx)
+            if card:
+                card_activity = Activity(
+                    type="message",
+                    attachments=[
+                        Attachment(
+                            content_type="application/vnd.microsoft.card.adaptive",
+                            content=card,
+                        )
+                    ],
+                )
+                await turn_context.send_activity(card_activity)
+
         except Exception as exc:
             print(f"[pipeline error] {exc}", file=sys.stderr)
             await turn_context.send_activity(f"Something went wrong: {exc}")
 
+    # ------------------------------------------------------------------
+    # Card response handler
+    # ------------------------------------------------------------------
+
+    async def _handle_card_action(self, turn_context: TurnContext, value: dict):
+        action = value.get("zt_action")
+
+        if action == "skip_review":
+            await turn_context.send_activity("✅ Draft minutes stand as sent.")
+            return
+
+        if action == "finalize_minutes":
+            try:
+                # Decode the original board embedded in the card payload
+                b64 = value.get("board_b64", "")
+                board = json.loads(base64.b64decode(b64).decode("utf-8"))
+                items = board.get("items", [])
+
+                # Apply owner assignments
+                for key, val in value.items():
+                    if key.startswith("owner_") and val:
+                        try:
+                            idx = int(key[6:])
+                            if 0 <= idx < len(items):
+                                items[idx]["owner"]        = val
+                                items[idx]["owner_source"] = "confirmed"
+                        except ValueError:
+                            pass
+
+                # Apply text corrections
+                for key, val in value.items():
+                    if key.startswith("text_") and val:
+                        try:
+                            idx = int(key[5:])
+                            if 0 <= idx < len(items):
+                                items[idx]["text"]       = val
+                                items[idx]["confidence"] = 1.0
+                        except ValueError:
+                            pass
+
+                board["items"] = items
+                ctx     = load_context()
+                minutes = render(board, ctx)
+                await turn_context.send_activity("✅ **Corrected minutes:**\n\n" + minutes)
+
+            except Exception as exc:
+                print(f"[card finalize error] {exc}", file=sys.stderr)
+                await turn_context.send_activity(f"Error applying corrections: {exc}")
+            return
+
+        # Unknown action — ignore silently
+        print(f"[bot] unknown zt_action: {action}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _is_channel(activity) -> bool:
     conv = activity.conversation
@@ -148,8 +247,8 @@ async def _image_from_graph(activity) -> tuple[bytes | None, str]:
         if not content_url:
             continue
         mime = _EXT_TO_MIME.get(os.path.splitext(name)[1], "image/jpeg")
-        enc = base64.b64encode(content_url.encode()).decode()
-        enc = enc.replace("+", "-").replace("/", "_").rstrip("=")
+        enc  = base64.b64encode(content_url.encode()).decode()
+        enc  = enc.replace("+", "-").replace("/", "_").rstrip("=")
         download_url = f"https://graph.microsoft.com/v1.0/shares/u!{enc}/driveItem/content"
         print(f"[Graph] downloading file via /shares", file=sys.stderr)
         try:
