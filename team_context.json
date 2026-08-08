@@ -1,15 +1,30 @@
 {
   "_note": "Team knowledge file. Update and commit to git after each session to improve Scribe. Nothing in here is code — edit freely.",
 
-  "format": "friday_fifty",
-
+  "default_template": "friday_fifty",
   "members": ["DS", "SG", "KS", "MA", "GS", "SS"],
 
-  "column_order": ["progress", "plans", "pitfalls"],
-  "column_labels": {
-    "progress": "Progress",
-    "plans": "Plans",
-    "pitfalls": "Pitfalls"
+  "templates": {
+    "friday_fifty": {
+      "name": "Friday Fifty",
+      "description": "A weekly team standup. Each team member fills in three columns on a shared whiteboard: Progress (what was accomplished since last week), Plans (what is planned for next week), and Pitfalls (blockers, risks, or problems). Items are organised under each person's initials as a section header within each column.",
+      "column_order": ["progress", "plans", "pitfalls"],
+      "column_labels": {
+        "progress": "Progress",
+        "plans": "Plans",
+        "pitfalls": "Pitfalls"
+      }
+    },
+    "brainstorm": {
+      "name": "Brainstorming Session",
+      "description": "Free-form ideation session. Contributions are captured under three loose headings: Ideas (new proposals or suggestions), Challenges (obstacles, questions, or concerns), and Next Steps (agreed actions or owners). Strict per-person ownership is less important — many items may be shared or unattributed.",
+      "column_order": ["ideas", "challenges", "next_steps"],
+      "column_labels": {
+        "ideas": "Ideas",
+        "challenges": "Challenges",
+        "next_steps": "Next Steps"
+      }
+    }
   },
 
   "_glossary_note": "Glossary is for Scribe's OCR disambiguation only. Terms are written as-is in the output — do not expand them.",

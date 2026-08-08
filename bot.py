@@ -5,19 +5,25 @@ In Teams channels file attachments never arrive in the bot activity.
 The bot fetches the image from the message via Microsoft Graph API.
 Requires ChannelMessage.Read.All application permission + admin consent.
 
-Card flow
+Turn flow
 ---------
-1. User @mentions bot with a whiteboard photo.
-2. Bot calls Claude → board dict → render() → sends draft minutes.
-3. If there are unattributed or low-confidence items, bot also sends a
-   clarification Adaptive Card.
-4. User fills in corrections and clicks "Submit corrections".
-   Teams sends a messageBack activity with activity.value containing:
-     zt_action  : "finalize_minutes"
-     board_b64  : base64-encoded JSON of the original board
-     owner_<N>  : owner assignment for item N (if set)
-     text_<N>   : corrected text for item N (if set)
-5. Bot applies corrections, re-renders, and sends the final minutes.
+  Turn 1 — image message arrives:
+    a) If multiple templates are configured: store image in memory, send template
+       selection card.
+    b) If only one template: go straight to extraction.
+
+  Turn 2 (optional) — template card submitted (zt_action: "select_template"):
+    Retrieve stored image, extract with chosen template, send draft + review card.
+
+  Turn 3 (optional) — review card submitted (zt_action: "finalize_minutes"):
+    Apply owner/text corrections deterministically (no LLM call), send corrected
+    minutes.
+    Owner free-text field (owner_text_N) takes precedence over the dropdown
+    (owner_N) if both are filled.
+
+  LLM is called only for extraction. Card responses are pure JSON surgery.
+  The only server-side state is the image store (keyed by conversation ID);
+  all other context is re-read from team_context.json at response time.
 """
 
 import base64
@@ -26,13 +32,21 @@ import os
 import re
 import sys
 from urllib.parse import quote
+
 import aiohttp
 import msal
 from botbuilder.core import ActivityHandler, TurnContext
 from botbuilder.schema import Activity, Attachment
 from dotenv import load_dotenv
 
-from pipeline import build_clarification_card, extract, load_context, render
+from pipeline import (
+    build_clarification_card,
+    build_template_card,
+    extract,
+    load_context,
+    render,
+    resolve_template,
+)
 
 load_dotenv()
 
@@ -45,22 +59,27 @@ _EXT_TO_MIME = {
 
 class ScribeBot(ActivityHandler):
 
+    # Raw image bytes stored between template-selection card and user response.
+    # Keyed by conversation ID.  Lost on server restart (Render scale-to-zero);
+    # handled gracefully with a "session expired" message.
+    _image_store: dict[str, tuple[bytes, str]] = {}
+    _MAX_STORE = 20   # prevent unbounded growth; evict oldest on overflow
+
     # ------------------------------------------------------------------
-    # Main turn handler
+    # Turn 1 — image message
     # ------------------------------------------------------------------
 
     async def on_message_activity(self, turn_context: TurnContext):
         activity = turn_context.activity
 
-        # ---- Adaptive Card submission ----------------------------------------
+        # Card submission (turns 2 / 3)
         value = getattr(activity, "value", None)
         if isinstance(value, dict) and "zt_action" in value:
             await self._handle_card_action(turn_context, value)
             return
 
-        # ---- Normal image-processing message --------------------------------
+        # Fetch image
         image_bytes, mime = await _image_from_activity(activity)
-
         if image_bytes is None and _is_channel(activity):
             await turn_context.send_activity(
                 "One moment — fetching the image from the channel…"
@@ -73,69 +92,91 @@ class ScribeBot(ActivityHandler):
             )
             return
 
-        await turn_context.send_activity("Reading the board, give me a moment…")
-        try:
-            ctx   = load_context()
-            board = extract(image_bytes, mime, ctx)
-            draft = render(board, ctx)
-            await turn_context.send_activity(draft)
+        ctx = load_context()
+        template_card = build_template_card(ctx)
 
-            card = build_clarification_card(board, ctx)
-            if card:
-                card_activity = Activity(
-                    type="message",
-                    attachments=[
-                        Attachment(
-                            content_type="application/vnd.microsoft.card.adaptive",
-                            content=card,
-                        )
-                    ],
-                )
-                await turn_context.send_activity(card_activity)
-
-        except Exception as exc:
-            print(f"[pipeline error] {exc}", file=sys.stderr)
-            await turn_context.send_activity(f"Something went wrong: {exc}")
+        if template_card:
+            # Multiple templates: ask first, extract after user picks
+            conv_id = activity.conversation.id
+            if len(self._image_store) >= self._MAX_STORE:
+                oldest = next(iter(self._image_store))
+                del self._image_store[oldest]
+            self._image_store[conv_id] = (image_bytes, mime)
+            await turn_context.send_activity(Activity(
+                type="message",
+                attachments=[Attachment(
+                    content_type="application/vnd.microsoft.card.adaptive",
+                    content=template_card,
+                )]
+            ))
+        else:
+            # Single template: extract immediately with default
+            resolved_ctx = resolve_template(ctx)
+            await self._run_pipeline(turn_context, image_bytes, mime, resolved_ctx)
 
     # ------------------------------------------------------------------
-    # Card response handler
+    # Card action dispatcher
     # ------------------------------------------------------------------
 
     async def _handle_card_action(self, turn_context: TurnContext, value: dict):
         action = value.get("zt_action")
 
+        # ---- Template selection (Turn 2) --------------------------------
+        if action == "select_template":
+            conv_id  = turn_context.activity.conversation.id
+            stored   = self._image_store.pop(conv_id, None)
+            if stored is None:
+                await turn_context.send_activity(
+                    "The session expired — please resend the image and @mention me again."
+                )
+                return
+            image_bytes, mime = stored
+            template_key = value.get("template_key") or None
+            ctx          = load_context()
+            resolved_ctx = resolve_template(ctx, template_key)
+            await self._run_pipeline(turn_context, image_bytes, mime, resolved_ctx)
+            return
+
+        # ---- Review card: skip ----------------------------------------
         if action == "skip_review":
             await turn_context.send_activity("✅ Draft minutes stand as sent.")
             return
 
+        # ---- Review card: apply corrections (Turn 3) -------------------
         if action == "finalize_minutes":
             try:
-                # Decode the original board embedded in the card payload
-                b64 = value.get("board_b64", "")
+                b64   = value.get("board_b64", "")
                 board = json.loads(base64.b64decode(b64).decode("utf-8"))
                 items = board.get("items", [])
 
-                # Apply owner assignments
-                for key, val in value.items():
-                    if key.startswith("owner_") and val:
-                        try:
-                            idx = int(key[6:])
-                            if 0 <= idx < len(items):
-                                items[idx]["owner"]        = val
-                                items[idx]["owner_source"] = "confirmed"
-                        except ValueError:
-                            pass
+                # Collect all keys once so we can detect free-text overrides
+                owner_text_keys = {
+                    int(k[11:]): v.strip()
+                    for k, v in value.items()
+                    if k.startswith("owner_text_") and isinstance(v, str) and v.strip()
+                    and k[11:].isdigit()
+                }
+                owner_keys = {
+                    int(k[6:]): v
+                    for k, v in value.items()
+                    if k.startswith("owner_") and not k.startswith("owner_text_")
+                    and isinstance(v, str) and v and k[6:].isdigit()
+                }
 
-                # Apply text corrections
-                for key, val in value.items():
-                    if key.startswith("text_") and val:
-                        try:
-                            idx = int(key[5:])
-                            if 0 <= idx < len(items):
-                                items[idx]["text"]       = val
-                                items[idx]["confidence"] = 1.0
-                        except ValueError:
-                            pass
+                for idx in set(owner_text_keys) | set(owner_keys):
+                    if 0 <= idx < len(items):
+                        # Free text wins over dropdown
+                        new_owner = owner_text_keys.get(idx) or owner_keys.get(idx)
+                        if new_owner:
+                            items[idx]["owners"]       = [new_owner]
+                            items[idx]["owner_source"] = "confirmed"
+
+                for k, v in value.items():
+                    if k.startswith("text_") and isinstance(v, str) and v and k[5:].isdigit():
+                        idx = int(k[5:])
+                        if 0 <= idx < len(items):
+                            items[idx]["text"]       = v
+                            items[idx]["confidence"] = 1.0
 
                 board["items"] = items
                 ctx     = load_context()
@@ -147,8 +188,37 @@ class ScribeBot(ActivityHandler):
                 await turn_context.send_activity(f"Error applying corrections: {exc}")
             return
 
-        # Unknown action — ignore silently
         print(f"[bot] unknown zt_action: {action}", file=sys.stderr)
+
+    # ------------------------------------------------------------------
+    # Extraction + draft send
+    # ------------------------------------------------------------------
+
+    async def _run_pipeline(
+        self,
+        turn_context: TurnContext,
+        image_bytes: bytes,
+        mime: str,
+        resolved_ctx: dict,
+    ):
+        await turn_context.send_activity("Reading the board, give me a moment…")
+        try:
+            board = extract(image_bytes, mime, resolved_ctx)
+            draft = render(board, resolved_ctx)
+            await turn_context.send_activity(draft)
+
+            card = build_clarification_card(board, resolved_ctx)
+            if card:
+                await turn_context.send_activity(Activity(
+                    type="message",
+                    attachments=[Attachment(
+                        content_type="application/vnd.microsoft.card.adaptive",
+                        content=card,
+                    )]
+                ))
+        except Exception as exc:
+            print(f"[pipeline error] {exc}", file=sys.stderr)
+            await turn_context.send_activity(f"Something went wrong: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +240,10 @@ async def _image_from_activity(activity) -> tuple[bytes | None, str]:
             if url.startswith("data:"):
                 _, enc = url.split(",", 1)
                 return base64.b64decode(enc), ct
-            # smba.trafficmanager.net URLs require a bot-service connector token
-            # that isn't available here; skip them and let Graph handle it instead.
+            # smba.trafficmanager.net / botframework.com URLs require a
+            # connector-service token we don't have here — Graph handles it.
             if "smba.trafficmanager.net" in url or "botframework.com" in url:
-                print(f"[att] skipping bot-service URL (needs connector token) — Graph will handle", file=sys.stderr)
+                print("[att] skipping bot-service URL — Graph will handle", file=sys.stderr)
                 continue
             try:
                 return await _get(url, {}), ct
@@ -210,25 +280,24 @@ async def _image_from_graph(activity) -> tuple[bytes | None, str]:
     """Fetch the image from a Teams channel message via Microsoft Graph."""
     token = await _graph_token()
     if not token:
-        print("[Graph] no token — add ChannelMessage.Read.All + grant admin consent", file=sys.stderr)
+        print("[Graph] no token — check ChannelMessage.Read.All consent", file=sys.stderr)
         return None, "image/jpeg"
 
     headers = {"Authorization": f"Bearer {token}"}
     cd = activity.channel_data or {}
-    # Graph API needs the AAD group ID for the team, not the Teams thread ID
     team_id    = (cd.get("team") or {}).get("aadGroupId")
     channel_id = cd.get("teamsChannelId") or (cd.get("channel") or {}).get("id")
     message_id = activity.id
 
     if not all([team_id, channel_id, message_id]):
-        print(f"[Graph] missing IDs team={team_id} channel={channel_id} msg={message_id}", file=sys.stderr)
+        print(f"[Graph] missing IDs team={team_id} channel={channel_id} msg={message_id}",
+              file=sys.stderr)
         return None, "image/jpeg"
 
     channel_id_enc = quote(channel_id, safe="")
     base = (f"https://graph.microsoft.com/v1.0"
             f"/teams/{team_id}/channels/{channel_id_enc}/messages/{message_id}")
 
-    # GET the message (no $expand — unsupported on this endpoint per Graph docs)
     async with aiohttp.ClientSession() as session:
         async with session.get(base, headers=headers) as resp:
             body = await resp.text()
@@ -240,8 +309,7 @@ async def _image_from_graph(activity) -> tuple[bytes | None, str]:
     atts = msg.get("attachments") or []
     print(f"[Graph] message OK, attachments={len(atts)}", file=sys.stderr)
 
-    # File attachments have contentType "reference" and a SharePoint contentUrl.
-    # Must download via Graph /shares API (requires Files.Read.All permission).
+    # File attachments (contentType: "reference") — download via /shares
     for att in atts:
         if att.get("contentType") != "reference":
             continue
@@ -254,15 +322,14 @@ async def _image_from_graph(activity) -> tuple[bytes | None, str]:
         mime = _EXT_TO_MIME.get(os.path.splitext(name)[1], "image/jpeg")
         enc  = base64.b64encode(content_url.encode()).decode()
         enc  = enc.replace("+", "-").replace("/", "_").rstrip("=")
-        download_url = f"https://graph.microsoft.com/v1.0/shares/u!{enc}/driveItem/content"
-        print(f"[Graph] downloading file via /shares", file=sys.stderr)
+        dl   = f"https://graph.microsoft.com/v1.0/shares/u!{enc}/driveItem/content"
+        print("[Graph] downloading file via /shares", file=sys.stderr)
         try:
-            return await _get(download_url, headers), mime
+            return await _get(dl, headers), mime
         except Exception as exc:
             print(f"[Graph] /shares download failed: {exc}", file=sys.stderr)
 
-    # Inline/pasted images arrive as hostedContents.
-    # List returns null bytes — must fetch /$value per item individually.
+    # Inline / pasted images — hostedContents (must fetch /$value per item)
     async with aiohttp.ClientSession() as session:
         async with session.get(f"{base}/hostedContents", headers=headers) as resp:
             if resp.status == 200:
