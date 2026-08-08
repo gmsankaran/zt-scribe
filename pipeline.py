@@ -272,18 +272,18 @@ def render(board: dict, ctx: dict | None = None) -> str:
 
     out: list[str] = ["# Minutes\n"]
 
-    for owner in members:
-        cols    = by_owner.get(owner, {})
-        has_any = any(cols.get(c) for c in col_order)
+    # Column-first: Progress → Plans → Pitfalls, members nested within each column.
+    for col in col_order:
+        label   = col_labels.get(col, col.title())
+        has_any = any(by_owner.get(owner, {}).get(col) for owner in members)
         if not has_any:
             continue
-        out.append(f"\n## {owner}\n")
-        for col in col_order:
-            group = cols.get(col, [])
+        out.append(f"\n## {label}\n")
+        for owner in members:
+            group = by_owner.get(owner, {}).get(col, [])
             if not group:
                 continue
-            label = col_labels.get(col, col.title())
-            out.append(f"**{label}**\n")
+            out.append(f"**{owner}**\n")
             out.extend(_render_tree(group))
             out.append("")
 
@@ -379,11 +379,16 @@ def build_clarification_card(board: dict, ctx: dict | None = None) -> dict | Non
             return _primary_owner(parent, visited)
         return None
 
-    # Only surface top-level unattributed (sub-bullets inherit)
-    unattr   = [(i, it) for i, it in enumerate(items)
-                if _primary_owner(i) not in members and it.get("parent_index") is None]
+    # Only surface top-level unattributed items (sub-bullets inherit from parent).
+    unattr = [(i, it) for i, it in enumerate(items)
+              if _primary_owner(i) not in members and it.get("parent_index") is None]
+    unattr_indices = {i for i, _ in unattr}
+
+    # Exclude unattributed items from the low-confidence section — they already
+    # appear above with owner dropdowns; showing them again as text edits is confusing.
     low_conf = [(i, it) for i, it in enumerate(items)
-                if it.get("confidence", 1.0) < _LOW_CONF_CARD]
+                if it.get("confidence", 1.0) < _LOW_CONF_CARD
+                and i not in unattr_indices]
 
     if not unattr and not low_conf:
         return None
@@ -409,12 +414,13 @@ def build_clarification_card(board: dict, ctx: dict | None = None) -> dict | Non
                     {"type": "TextBlock",
                      "text": f"{it['text']}  _[{col_label}]_",
                      "wrap": True, "isSubtle": True},
-                    # Dropdown for quick-pick from known members
+                    # Multi-select dropdown — picks "DS,MA" for joint ownership
                     {"type": "Input.ChoiceSet", "id": f"owner_{i}",
-                     "placeholder": "Quick-pick…", "choices": member_choices},
-                    # Free-text field — takes precedence over the dropdown if filled
+                     "isMultiSelect": True,
+                     "placeholder": "Select owner(s)…", "choices": member_choices},
+                    # Free-text override — use for names not in the list, or "GS → SS"
                     {"type": "Input.Text", "id": f"owner_text_{i}",
-                     "placeholder": "Or type initials / name (overrides dropdown)"},
+                     "placeholder": "Or type freely (overrides dropdown)"},
                 ],
             })
 

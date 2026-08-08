@@ -149,26 +149,31 @@ class ScribeBot(ActivityHandler):
                 board = json.loads(base64.b64decode(b64).decode("utf-8"))
                 items = board.get("items", [])
 
-                # Collect all keys once so we can detect free-text overrides
-                owner_text_keys = {
+                def _parse_owners(raw: str) -> list[str]:
+                    """Split 'GS,MA' / 'GS, MA' / 'GS MA' → ['GS', 'MA']."""
+                    return [o.strip() for o in re.split(r"[,\s]+", raw) if o.strip()]
+
+                # Collect owner assignments.  Free-text field wins over dropdown.
+                owner_text = {
                     int(k[11:]): v.strip()
                     for k, v in value.items()
                     if k.startswith("owner_text_") and isinstance(v, str) and v.strip()
                     and k[11:].isdigit()
                 }
-                owner_keys = {
+                # Multi-select dropdown returns comma-separated string e.g. "GS,MA"
+                owner_pick = {
                     int(k[6:]): v
                     for k, v in value.items()
                     if k.startswith("owner_") and not k.startswith("owner_text_")
                     and isinstance(v, str) and v and k[6:].isdigit()
                 }
 
-                for idx in set(owner_text_keys) | set(owner_keys):
+                for idx in set(owner_text) | set(owner_pick):
                     if 0 <= idx < len(items):
-                        # Free text wins over dropdown
-                        new_owner = owner_text_keys.get(idx) or owner_keys.get(idx)
-                        if new_owner:
-                            items[idx]["owners"]       = [new_owner]
+                        raw = owner_text.get(idx) or owner_pick.get(idx, "")
+                        parsed = _parse_owners(raw)
+                        if parsed:
+                            items[idx]["owners"]       = parsed
                             items[idx]["owner_source"] = "confirmed"
 
                 for k, v in value.items():
