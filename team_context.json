@@ -7,7 +7,7 @@
   "templates": {
     "friday_fifty": {
       "name": "Friday Fifty",
-      "description": "A weekly team standup. Each team member fills in three columns on a shared whiteboard: Progress (what was accomplished since last week), Plans (what is planned for next week), and Pitfalls (blockers, risks, or problems). Items are organised under each person's initials as a section header within each column.",
+      "description": "A weekly team standup facilitated by a moderator who writes on the whiteboard while eliciting inputs from each team member in turn. The board has three columns: Progress (what was accomplished since last week), Plans (what is planned for next week), and Pitfalls (blockers, risks, or problems). Within each column, the moderator writes the person's initials as a section header and captures their inputs beneath it.",
       "column_order": ["progress", "plans", "pitfalls"],
       "column_labels": {
         "progress": "Progress",
