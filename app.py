@@ -6,6 +6,7 @@ Point your Azure Bot registration (or Bot Framework Emulator) at that URL,
 or tunnel it with: ngrok http 3978
 """
 
+import asyncio
 import os
 import sys
 
@@ -89,10 +90,13 @@ async def messages(req: Request) -> Response:
     body = await req.json()
     activity = Activity().deserialize(body)
     auth_header = req.headers.get("Authorization", "")
-    invoke_response = await ADAPTER.process_activity(activity, auth_header, BOT.on_turn)
-    if invoke_response:
-        return json_response(data=invoke_response.body, status=invoke_response.status)
-    return Response(status=201)
+    # Return 202 immediately so Teams doesn't show a spurious "Something went wrong"
+    # banner while Claude is processing. The turn runs as a background task; errors
+    # are caught inside on_turn and sent as follow-up messages via the turn context.
+    asyncio.create_task(
+        ADAPTER.process_activity(activity, auth_header, BOT.on_turn)
+    )
+    return Response(status=202)
 
 
 async def health(req: Request) -> Response:
