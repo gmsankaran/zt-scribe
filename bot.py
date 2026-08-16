@@ -59,10 +59,9 @@ _EXT_TO_MIME = {
 
 class ScribeBot(ActivityHandler):
 
-    # Raw image bytes stored between template-selection card and user response.
-    # Keyed by conversation ID.  Lost on server restart (Render scale-to-zero);
-    # handled gracefully with a "session expired" message.
-    _image_store: dict[str, tuple[bytes, str]] = {}
+    # All images from one message, stored between template-selection card and response.
+    # Keyed by conversation ID.  Lost on server restart; handled with "session expired".
+    _image_store: dict[str, list[tuple[bytes, str]]] = {}
     _MAX_STORE = 20   # prevent unbounded growth; evict oldest on overflow
 
     # ------------------------------------------------------------------
@@ -78,19 +77,22 @@ class ScribeBot(ActivityHandler):
             await self._handle_card_action(turn_context, value)
             return
 
-        # Fetch image
-        image_bytes, mime = await _image_from_activity(activity)
-        if image_bytes is None and _is_channel(activity):
+        # Fetch all images (there may be multiple attachments)
+        images = await _images_from_activity(activity)
+        if not images and _is_channel(activity):
             await turn_context.send_activity(
-                "One moment — fetching the image from the channel…"
+                "One moment — fetching the image(s) from the channel…"
             )
-            image_bytes, mime = await _image_from_graph(activity)
+            images = await _images_from_graph(activity)
 
-        if image_bytes is None:
+        if not images:
             await turn_context.send_activity(
-                "Please attach a whiteboard photo to your message and @mention me."
+                "Please attach one or more whiteboard photos to your message and @mention me."
             )
             return
+
+        n = len(images)
+        print(f"[bot] {n} image(s) collected", file=sys.stderr)
 
         ctx = load_context()
         template_card = build_template_card(ctx)
@@ -101,7 +103,7 @@ class ScribeBot(ActivityHandler):
             if len(self._image_store) >= self._MAX_STORE:
                 oldest = next(iter(self._image_store))
                 del self._image_store[oldest]
-            self._image_store[conv_id] = (image_bytes, mime)
+            self._image_store[conv_id] = images
             await turn_context.send_activity(Activity(
                 type="message",
                 attachments=[Attachment(
@@ -110,9 +112,8 @@ class ScribeBot(ActivityHandler):
                 )]
             ))
         else:
-            # Single template: extract immediately with default
             resolved_ctx = resolve_template(ctx)
-            await self._run_pipeline(turn_context, image_bytes, mime, resolved_ctx)
+            await self._run_pipeline(turn_context, images, resolved_ctx)
 
     # ------------------------------------------------------------------
     # Card action dispatcher
@@ -130,11 +131,11 @@ class ScribeBot(ActivityHandler):
                     "The session expired — please resend the image and @mention me again."
                 )
                 return
-            image_bytes, mime = stored
+            images       = stored
             template_key = value.get("template_key") or None
             ctx          = load_context()
             resolved_ctx = resolve_template(ctx, template_key)
-            await self._run_pipeline(turn_context, image_bytes, mime, resolved_ctx)
+            await self._run_pipeline(turn_context, images, resolved_ctx)
             return
 
         # ---- Review card: skip ----------------------------------------
@@ -202,13 +203,14 @@ class ScribeBot(ActivityHandler):
     async def _run_pipeline(
         self,
         turn_context: TurnContext,
-        image_bytes: bytes,
-        mime: str,
+        images: list[tuple[bytes, str]],
         resolved_ctx: dict,
     ):
-        await turn_context.send_activity("Reading the board, give me a moment…")
+        n = len(images)
+        msg = "Reading the board, give me a moment…" if n == 1 else f"Reading {n} photos, give me a moment…"
+        await turn_context.send_activity(msg)
         try:
-            board = extract(image_bytes, mime, resolved_ctx)
+            board = extract(images, resolved_ctx)
             draft = render(board, resolved_ctx)
             await turn_context.send_activity(draft)
 
@@ -235,8 +237,10 @@ def _is_channel(activity) -> bool:
     return getattr(conv, "conversation_type", None) == "channel"
 
 
-async def _image_from_activity(activity) -> tuple[bytes | None, str]:
-    """Extract image from any attachment that arrived directly in the activity."""
+async def _images_from_activity(activity) -> list[tuple[bytes, str]]:
+    """Collect all image attachments that arrived directly in the activity."""
+    results: list[tuple[bytes, str]] = []
+
     for a in (activity.attachments or []):
         ct = a.content_type or ""
 
@@ -244,18 +248,17 @@ async def _image_from_activity(activity) -> tuple[bytes | None, str]:
             url = a.content_url or ""
             if url.startswith("data:"):
                 _, enc = url.split(",", 1)
-                return base64.b64decode(enc), ct
-            # smba.trafficmanager.net / botframework.com URLs require a
-            # connector-service token we don't have here — Graph handles it.
+                results.append((base64.b64decode(enc), ct))
+                continue
             if "smba.trafficmanager.net" in url or "botframework.com" in url:
                 print("[att] skipping bot-service URL — Graph will handle", file=sys.stderr)
                 continue
             try:
-                return await _get(url, {}), ct
+                results.append((await _get(url, {}), ct))
             except Exception as exc:
                 print(f"[att] inline image download failed: {exc}", file=sys.stderr)
 
-        if ct == "application/vnd.microsoft.teams.file.download.info":
+        elif ct == "application/vnd.microsoft.teams.file.download.info":
             name = (a.name or "").lower()
             if any(name.endswith(ext) for ext in _IMAGE_EXTS):
                 mime = _EXT_TO_MIME.get(os.path.splitext(name)[1], "image/jpeg")
@@ -265,28 +268,28 @@ async def _image_from_activity(activity) -> tuple[bytes | None, str]:
                 url = (content or {}).get("downloadUrl") or a.content_url or ""
                 if url:
                     try:
-                        return await _get(url, {}), mime
+                        results.append((await _get(url, {}), mime))
                     except Exception as exc:
                         print(f"[att] file download failed: {exc}", file=sys.stderr)
 
-        if ct == "text/html":
+        elif ct == "text/html":
             html = a.content if isinstance(a.content, str) else ""
             m = re.search(r'<img\b[^>]+\bsrc=["\']([^"\']+)["\']', html, re.IGNORECASE)
             if m:
                 src = m.group(1)
                 if src.startswith("data:image/"):
                     _, enc = src.split(",", 1)
-                    return base64.b64decode(enc), src.split(";")[0][5:]
+                    results.append((base64.b64decode(enc), src.split(";")[0][5:]))
 
-    return None, "image/jpeg"
+    return results
 
 
-async def _image_from_graph(activity) -> tuple[bytes | None, str]:
-    """Fetch the image from a Teams channel message via Microsoft Graph."""
+async def _images_from_graph(activity) -> list[tuple[bytes, str]]:
+    """Fetch ALL images from a Teams channel message via Microsoft Graph."""
     token = await _graph_token()
     if not token:
         print("[Graph] no token — check ChannelMessage.Read.All consent", file=sys.stderr)
-        return None, "image/jpeg"
+        return []
 
     headers = {"Authorization": f"Bearer {token}"}
     cd = activity.channel_data or {}
@@ -297,7 +300,7 @@ async def _image_from_graph(activity) -> tuple[bytes | None, str]:
     if not all([team_id, channel_id, message_id]):
         print(f"[Graph] missing IDs team={team_id} channel={channel_id} msg={message_id}",
               file=sys.stderr)
-        return None, "image/jpeg"
+        return []
 
     channel_id_enc = quote(channel_id, safe="")
     base = (f"https://graph.microsoft.com/v1.0"
@@ -308,13 +311,14 @@ async def _image_from_graph(activity) -> tuple[bytes | None, str]:
             body = await resp.text()
             if resp.status != 200:
                 print(f"[Graph] GET message → {resp.status}: {body[:400]}", file=sys.stderr)
-                return None, "image/jpeg"
+                return []
             msg = json.loads(body)
 
     atts = msg.get("attachments") or []
     print(f"[Graph] message OK, attachments={len(atts)}", file=sys.stderr)
+    results: list[tuple[bytes, str]] = []
 
-    # File attachments (contentType: "reference") — download via /shares
+    # File attachments (contentType "reference") — all of them
     for att in atts:
         if att.get("contentType") != "reference":
             continue
@@ -328,13 +332,13 @@ async def _image_from_graph(activity) -> tuple[bytes | None, str]:
         enc  = base64.b64encode(content_url.encode()).decode()
         enc  = enc.replace("+", "-").replace("/", "_").rstrip("=")
         dl   = f"https://graph.microsoft.com/v1.0/shares/u!{enc}/driveItem/content"
-        print("[Graph] downloading file via /shares", file=sys.stderr)
+        print(f"[Graph] downloading {name} via /shares", file=sys.stderr)
         try:
-            return await _get(dl, headers), mime
+            results.append((await _get(dl, headers), mime))
         except Exception as exc:
-            print(f"[Graph] /shares download failed: {exc}", file=sys.stderr)
+            print(f"[Graph] /shares download failed for {name}: {exc}", file=sys.stderr)
 
-    # Inline / pasted images — hostedContents (must fetch /$value per item)
+    # Inline / pasted images — hostedContents (fetch /$value for each)
     async with aiohttp.ClientSession() as session:
         async with session.get(f"{base}/hostedContents", headers=headers) as resp:
             if resp.status == 200:
@@ -348,13 +352,13 @@ async def _image_from_graph(activity) -> tuple[bytes | None, str]:
                         if hc_resp.status == 200:
                             ct = hc_resp.headers.get("content-type", "").split(";")[0]
                             if ct.startswith("image/"):
-                                return await hc_resp.read(), ct
+                                results.append((await hc_resp.read(), ct))
             else:
                 txt = await resp.text()
                 print(f"[Graph] hostedContents → {resp.status}: {txt[:200]}", file=sys.stderr)
 
-    print("[Graph] no image found in message", file=sys.stderr)
-    return None, "image/jpeg"
+    print(f"[Graph] total images collected: {len(results)}", file=sys.stderr)
+    return results
 
 
 async def _graph_token() -> str | None:

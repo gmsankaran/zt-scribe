@@ -2,7 +2,17 @@
   "_note": "Team knowledge file. Update and commit to git after each session to improve Scribe. Nothing in here is code — edit freely.",
 
   "default_template": "friday_fifty",
-  "members": ["DS", "SG", "KS", "MA", "GS", "SS"],
+  "members": ["DS", "SG", "KS", "MA", "GS", "SS", "SarS"],
+
+  "member_names": {
+    "DS":   "Dimple",
+    "SG":   "Sara",
+    "KS":   "Karthik",
+    "MA":   "Mohammad",
+    "GS":   "Ganesh",
+    "SS":   "Sagar Sirbi",
+    "SarS": "Saraswathi Sundaresan"
+  },
 
   "templates": {
     "friday_fifty": {

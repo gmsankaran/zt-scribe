@@ -74,8 +74,9 @@ def resolve_template(ctx: dict, template_key: str | None = None) -> dict:
 # Extraction
 # ---------------------------------------------------------------------------
 
-def _build_prompt(ctx: dict) -> str:
+def _build_prompt(ctx: dict, n_images: int = 1) -> str:
     members      = ctx.get("members", [])
+    member_names = ctx.get("member_names", {})
     col_order    = ctx.get("column_order", ["progress", "plans", "pitfalls"])
     glossary     = ctx.get("glossary", {})
     people       = ctx.get("people", {})
@@ -88,26 +89,47 @@ def _build_prompt(ctx: dict) -> str:
     glossary_str  = "\n".join(f"  {k}: {v}" for k, v in glossary.items()) if glossary else "  (none)"
     people_str    = "\n".join(f"  {k}: {v}" for k, v in people.items() if v) if people else "  (none)"
     confirmed_str = "\n".join(f"  {k} → {v}" for k, v in confirmed.items()) if confirmed else "  (none)"
+    names_str     = "\n".join(f"  {initials} = {name}" for initials, name in member_names.items()) if member_names else "  (none)"
+
+    multi_image_note = ""
+    if n_images > 1:
+        multi_image_note = (
+            f"\nI am sending you {n_images} photos that together cover the full whiteboard "
+            f"session. Extract all items from all photos and consolidate into one list. "
+            f"Deduplicate any item that appears in more than one photo.\n"
+        )
 
     return f"""You are reading a whiteboard from a {tmpl_name} meeting.
-
+{multi_image_note}
 MEETING FORMAT:
 {tmpl_desc if tmpl_desc else f"The board has {len(col_order)} columns: {', '.join(col_order)}."}
 
 PARTICIPANTS (initials that appear as section headers): {members_str}
 
+TEAM MEMBER NAMES — the moderator sometimes writes first names instead of initials;
+map them to the correct initials using this table:
+{names_str}
+  Note: "SS" = Sagar Sirbi; "SarS" = Saraswathi Sundaresan — distinguish carefully.
+
 OWNERSHIP RULES — read carefully:
-  1. Within each column, person initials appear as bold section headers (e.g. "DS" written
-     prominently). Every item below that header, until the next person's header, belongs to
-     that person (owner_source: "section").
-  2. If initials are written explicitly on or beside a specific item, those override the
-     section header for that item (owner_source: "explicit").
+  1. Within each column, person initials or first names appear as bold section headers.
+     Every item below that header, until the next person's header, belongs to that person
+     (owner_source: "section").
+  2. If initials or a first name are written explicitly on or beside a specific item, those
+     override the section header (owner_source: "explicit").
   3. Items can have MULTIPLE owners — capture all of them:
        • Comma notation  (DS, KS)  → owners: ["DS","KS"],  ownership_notation: ","
        • Arrow notation  (GS → SS) → owners: ["GS","SS"],  ownership_notation: "→"
        • Single owner               → owners: ["DS"],       ownership_notation: null
        • Genuinely unattributed     → owners: [],           ownership_notation: null
   4. Sub-bullets (indented items) inherit owners from their parent item.
+
+MARKERS AND FOOTNOTES: Items may carry markers (asterisk *, box □, double-asterisk **,
+circle ○). Look for a corresponding footnote or remark elsewhere on the board that explains
+what the marker means (e.g. "* = pending Radhika sign-off" written in a corner). If you
+find the explanation, incorporate it into the item text in parentheses — e.g. "Check in DCM
+(pending Radhika sign-off)". Still populate the markers field. If no explanation is found,
+leave the text unchanged and the marker field set.
 
 KNOWN ABBREVIATIONS — for OCR disambiguation only; keep terms as-is in output, do NOT expand:
 {glossary_str}
@@ -141,15 +163,26 @@ Output raw JSON only — no markdown fences, no commentary.
 """
 
 
-def extract(image_bytes: bytes, media_type: str = "image/jpeg", ctx: dict | None = None) -> dict:
-    """Send the whiteboard image to Claude and return the parsed board dict.
-    The caller should pass a ctx already resolved via resolve_template()."""
+def extract(images: list[tuple[bytes, str]], ctx: dict | None = None) -> dict:
+    """Send one or more whiteboard images to Claude and return the parsed board dict.
+
+    images  — list of (image_bytes, media_type) tuples; all are passed in one API call.
+    The caller should pass a ctx already resolved via resolve_template().
+    """
     if ctx is None:
         ctx = resolve_template(load_context())
+    if not images:
+        raise ValueError("extract() called with no images")
 
-    client   = anthropic.Anthropic()
-    b64_data = base64.standard_b64encode(image_bytes).decode("utf-8")
-    prompt   = _build_prompt(ctx)
+    client = anthropic.Anthropic()
+    prompt = _build_prompt(ctx, n_images=len(images))
+
+    # Build the content block: one image entry per photo, then the text prompt.
+    content: list[dict] = []
+    for img_bytes, media_type in images:
+        b64_data = base64.standard_b64encode(img_bytes).decode("utf-8")
+        content.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64_data}})
+    content.append({"type": "text", "text": prompt})
 
     model      = ctx.get("model", "claude-sonnet-5")
     max_tokens = ctx.get("max_tokens", 16000)
@@ -157,13 +190,7 @@ def extract(image_bytes: bytes, media_type: str = "image/jpeg", ctx: dict | None
     create_kwargs: dict = dict(
         model=model,
         max_tokens=max_tokens,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64_data}},
-                {"type": "text",  "text": prompt},
-            ],
-        }],
+        messages=[{"role": "user", "content": content}],
     )
 
     # Sonnet 5 / Opus 5 use adaptive thinking. "low" effort is right for OCR —
